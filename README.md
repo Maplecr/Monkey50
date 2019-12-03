@@ -2,7 +2,7 @@
 50 problems of operating system
 
 
-![](monkey.jpg)
+![](Monkey50.png)
 
 50题在moneky50.md文件内
 
