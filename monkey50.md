@@ -472,3 +472,164 @@
 - 区别
     - 进程的切换要保存和恢复大量的上下文信息,会比较耗时.
     - 而如果切换的两个线程共享了内存\文件描述符等信息,那么切换时所保存的上下文就会少很多,就能做到比较快的切换.
+
+## 八、进程间通信与同步
+
+> 在进程空间相互独立后，进程间相互的协作可分为三类：1是传递数据，2是同步，3是互斥访问共享数据。
+
+### 38. 能够用在进程间通信和同步的工具包括：共享内存、消息队列、信号量。另外，管道也、socket、普通文件也是进程间进行数据传递的方式。能够用在进程之间通信和同步的工具，是需要在内核实现的。
+
+### 39. 信号是内核与用户程序之间，不同进程用户程序之间沟通的一种异步机制。通常其实现方式直接包含在进程概念中，因此是UNIX操作系统一种基础机制。
+
+### 40. 联系题三11，生产者——消费者问题，读者——写者问题、哲学家就餐问题，应该能通过选用以上合适的同步工具，以多进程或多线程的方式实现相应的应用程序。
+
+在这里,我使用信号量和互斥锁实现了生产者--消费者问题.
+
+- 共使用了三个文件: `tmp`  `in`  `out`. 
+
+- `tmp`文件用于存放10个整数,作为生产者和消费者存取数字的缓冲区.  
+
+- 文件`in`用于存放生产者进程现在该生成那个数字了,生产者在生成数字前,先打开`in`文件,读出应该生成哪个数字,然后把要生成的这个数字按照顺序写到文件`tmp`的相应位置.接着,把从`in`中读到的数字加一,表示这是下一次要生产的数字,然后把这个数字写回到文件`in`中.
+
+- 文件`out`用于存放消费者现在已经消费了多少个数字,具体的使用方法和生产者对`in`文件的使用相同,这里不再赘述.
+
+具体的代码如下:
+
+```c
+#include <fcntl.h>
+#include <semaphore.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+// 定义缓冲区大小为10
+#define BUFF_SIZE 10
+
+// 定义生产的最大数字是60
+#define MAX_NUMBER 60
+
+// 开启的子进程,也就是消费者进程的个数
+#define N_CHILD 5
+
+// 整个过程中要用到的信号量
+sem_t *empty;
+sem_t *full;
+sem_t *metux;
+
+void producer() {
+    while (1) {
+        sem_wait(empty);
+        sem_wait(metux);
+
+        // 打开文件,将要执行写操作
+        int file = open("tmp", O_WRONLY);
+        // 读出这次应该写的序号是多少
+        int in;
+        int in_file = open("in", O_RDWR);
+        read(in_file, (void *)&in, sizeof(int));
+        // 算出这次写操作的偏移,也就是要到哪里去写
+        lseek(file, (in % BUFF_SIZE) * sizeof(int), SEEK_SET);
+        // 写入数据
+        write(file, (void *)&in, sizeof(in));
+        printf("producer: %d\t", in);
+        fflush(stdout);
+
+        in++;
+        lseek(in_file, 0, 0);
+        write(in_file, (void *)&in, sizeof(int));
+
+        close(file);
+        close(in_file);
+
+        sem_post(full);
+        sem_post(metux);
+
+        if (in > MAX_NUMBER) {
+            break;
+        }
+    }
+}
+
+void consumer() {
+    while (1) {
+        sem_wait(full);
+        sem_wait(metux);
+
+        // 打开文件,将要执行读操作
+        int file = open("tmp", O_RDONLY);
+        int out_file = open("out", O_RDWR);
+        int out;
+        read(out_file, (void *)&out, sizeof(out));
+        // 算出这次读操作的偏移,也就是去哪里读
+        lseek(file, (out % BUFF_SIZE) * sizeof(int), SEEK_SET);
+        // 读入数据
+        int out_number;
+        read(file, (void *)&out_number, sizeof(out_number));
+        printf("consumer%d: %d\t", getpid(), out_number);
+        fflush(stdout);
+        out++;
+        lseek(out_file, 0, 0);
+        write(out_file, (void *)&out, sizeof(int));
+        close(out_file);
+        close(file);
+
+        sem_post(empty);
+        sem_post(metux);
+
+        // 如果读到了最大值, 就退出
+        if (out_number >= MAX_NUMBER) {
+            return 0;
+        }
+    }
+    return 0;
+}
+int main(int argc, char const *argv[]) {
+    metux = sem_open("metux", O_CREAT | O_TRUNC, 0666, 1);
+    full = sem_open("full", O_CREAT | O_TRUNC, 0666, 0);
+    empty = sem_open("empty", O_CREAT | O_TRUNC, 0666, BUFF_SIZE);
+
+    // 消费者和生产者共用的用于交换数据的文件
+    int file = open("tmp", O_RDWR | O_CREAT, S_IRWXU);
+    close(file);
+
+    // 该文件用于生产者存放现在生产到哪个序号了
+    int in_file = open("in", O_RDWR | O_CREAT, S_IRWXU);
+    int tmp = 0;
+    lseek(in_file, 0, 0);
+    write(in_file, (void *)&tmp, sizeof(tmp));
+    close(in_file);
+
+    // 该文件用于消费者存放现在读到第几个数字了
+    int out_file = open("out", O_RDWR | O_CREAT, S_IRWXU);
+    write(out_file, (void *)&tmp, sizeof(int));
+    close(out_file);
+
+    if (!fork()) {
+        for (int i = 0; i < N_CHILD; i++) {
+            if (!fork()) {
+                consumer();
+            }
+        }
+    } else {
+        producer();
+
+        sleep(1);
+        sem_unlink(metux);
+        sem_unlink(full);
+        sem_unlink(empty);
+        // 杀掉正在等待的所有父进程和子进程
+        kill(0, 9);
+    }
+    return 0;
+}
+```
+
+运行效果如下图所示:
+
+![](2019-12-05-18-58-03.png)
+
+### 41. 对锁、信号量、管程，应该尽量掌握其实现方式。
+
+### 42. 对信号和管道，可尝试理解其实现方式。管道以文件形式实现，在学习文件系统后，可尝试理解。
